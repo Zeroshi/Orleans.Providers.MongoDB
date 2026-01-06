@@ -13,8 +13,9 @@ namespace Orleans.Providers.MongoDB.Membership.Store.Single
         private static readonly TableVersion NotFound = new TableVersion(0, "0");
         private readonly string collectionPrefix;
 
-        public SingleMembershipCollection(IMongoClient mongoClient, string databaseName, string collectionPrefix, bool createShardKey)
-            : base(mongoClient, databaseName, createShardKey)
+        public SingleMembershipCollection(IMongoClient mongoClient, string databaseName, string collectionPrefix, bool createShardKey,
+            Action<MongoCollectionSettings> collectionConfigurator)
+            : base(mongoClient, databaseName, collectionConfigurator, createShardKey)
         {
             this.collectionPrefix = collectionPrefix;
         }
@@ -34,7 +35,7 @@ namespace Orleans.Providers.MongoDB.Membership.Store.Single
             {
                 var member = kvp.Value;
 
-                if (member.Status == (int)SiloStatus.Dead && member.Timestamp < beforeDate)
+                if (member.Status != (int)SiloStatus.Active && member.Timestamp < beforeDate)
                 {
                     updates.Add(Update.Unset($"Members.{kvp.Key}"));
                 }
@@ -91,8 +92,11 @@ namespace Orleans.Providers.MongoDB.Membership.Store.Single
 
         public async Task UpdateIAmAlive(string deploymentId, SiloAddress address, DateTime iAmAliveTime)
         {
-            await Collection.UpdateOneAsync(x => x.DeploymentId == deploymentId,
-                Update
+            var filter = Builders<DeploymentDocument>.Filter.And(
+                Builders<DeploymentDocument>.Filter.Eq(x => x.DeploymentId, deploymentId),
+                Builders<DeploymentDocument>.Filter.Exists($"Members.{BuildKey(address)}", true));
+
+            await Collection.UpdateOneAsync(filter, Update
                     .Set($"Members.{BuildKey(address)}.IAmAliveTime", LogFormatter.PrintDate(iAmAliveTime)));
         }
 

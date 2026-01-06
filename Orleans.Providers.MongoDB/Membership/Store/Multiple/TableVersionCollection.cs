@@ -1,4 +1,5 @@
-﻿using System.Threading.Tasks;
+﻿using System;
+using System.Threading.Tasks;
 using MongoDB.Driver;
 using Orleans.Providers.MongoDB.Utils;
 
@@ -9,8 +10,13 @@ namespace Orleans.Providers.MongoDB.Membership.Store.Multiple
         private static readonly TableVersion NotFound = new TableVersion(0, "0");
         private readonly string collectionPrefix;
 
-        public TableVersionCollection(IMongoClient mongoClient, string databaseName, string collectionPrefix, bool createShardKey) 
-            : base(mongoClient, databaseName, createShardKey)
+        public TableVersionCollection(
+            IMongoClient mongoClient,
+            string databaseName,
+            string collectionPrefix,
+            Action<MongoCollectionSettings> collectionConfigurator,
+            bool createShardKey)
+            : base(mongoClient, databaseName, collectionConfigurator, createShardKey)
         {
             this.collectionPrefix = collectionPrefix;
         }
@@ -20,14 +26,14 @@ namespace Orleans.Providers.MongoDB.Membership.Store.Multiple
             return $"{collectionPrefix}OrleansMembershipV3_TableVersion";
         }
 
-        public Task DeleteAsync(string deploymentId)
+        public Task DeleteAsync(IClientSessionHandle session, string deploymentId)
         {
-            return Collection.DeleteOneAsync(x => x.DeploymentId == deploymentId);
+            return Collection.DeleteOneAsync(session, x => x.DeploymentId == deploymentId);
         }
 
-        public async Task<TableVersion> GetTableVersionAsync(string deploymentId)
+        public async Task<TableVersion> GetTableVersionAsync(IClientSessionHandle session, string deploymentId)
         {
-            var deployment = await Collection.Find(x => x.DeploymentId == deploymentId).FirstOrDefaultAsync();
+            var deployment = await Collection.Find(session, x => x.DeploymentId == deploymentId).FirstOrDefaultAsync();
 
             if (deployment == null)
             {
@@ -44,7 +50,7 @@ namespace Orleans.Providers.MongoDB.Membership.Store.Multiple
             try
             {
                 await Collection.ReplaceOneAsync(session,
-                    x => x.DeploymentId == deploymentId && x.VersionEtag == tableVersion.VersionEtag, 
+                    x => x.DeploymentId == deploymentId && x.VersionEtag == tableVersion.VersionEtag,
                     update,
                     UpsertReplace);
 

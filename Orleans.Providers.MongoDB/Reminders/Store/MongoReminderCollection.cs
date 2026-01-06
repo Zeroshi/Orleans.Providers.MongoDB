@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 using MongoDB.Driver;
@@ -11,23 +12,22 @@ namespace Orleans.Providers.MongoDB.Reminders.Store
 {
     public class MongoReminderCollection : CollectionBase<MongoReminderDocument>
     {
-        private static readonly FindOneAndUpdateOptions<MongoReminderDocument> FindAndUpsert = new FindOneAndUpdateOptions<MongoReminderDocument> { IsUpsert = true };
-        private readonly IGrainReferenceConverter grainReferenceConverter;
         private readonly string serviceId;
         private readonly string collectionPrefix;
+        private readonly bool removeAllLegacyIndexes;
 
-        public MongoReminderCollection(
-            IMongoClient mongoClient,
+        public MongoReminderCollection(IMongoClient mongoClient,
             string databaseName,
             string collectionPrefix,
+            Action<MongoCollectionSettings> collectionConfigurator,
             bool createShardKey,
-            string serviceId,
-            IGrainReferenceConverter grainReferenceConverter)
-            : base(mongoClient, databaseName, createShardKey)
+            bool removeAllLegacyIndexes,
+            string serviceId)
+            : base(mongoClient, databaseName, collectionConfigurator, createShardKey)
         {
             this.serviceId = serviceId;
             this.collectionPrefix = collectionPrefix;
-            this.grainReferenceConverter = grainReferenceConverter;
+            this.removeAllLegacyIndexes = removeAllLegacyIndexes;
         }
 
         protected override string CollectionName()
@@ -37,178 +37,185 @@ namespace Orleans.Providers.MongoDB.Reminders.Store
 
         protected override void SetupCollection(IMongoCollection<MongoReminderDocument> collection)
         {
-            var byHashDefinition =
+            var byGrainHashDefinition =
                 Index
-                    .Ascending(x => x.IsDeleted)
                     .Ascending(x => x.ServiceId)
                     .Ascending(x => x.GrainHash);
             try
             {
                 collection.Indexes.CreateOne(
-                    new CreateIndexModel<MongoReminderDocument>(byHashDefinition,
+                    new CreateIndexModel<MongoReminderDocument>(byGrainHashDefinition,
                         new CreateIndexOptions
                         {
-                            Name = "ByHash"
+                            Name = "ByGrainHash"
                         }));
             }
             catch (MongoCommandException ex)
             {
-                if (ex.CodeName == "IndexOptionsConflict")
+                if (!ex.IsDuplicateIndex())
                 {
-                    collection.Indexes.CreateOne(new CreateIndexModel<MongoReminderDocument>(byHashDefinition));
+                    throw;
                 }
+                
+                // ignore all exceptions that a pre-existing index has already been created. These indexes may
+                // have already been placed by Mongo Database administrators (e.g. "QueryOptimization_Finding1").
+                // in the future, if need to be culled, only try collect library generated indexes.
             }
 
-            var byNameDefinition =
-                Index
-                    .Ascending(x => x.IsDeleted)
-                    .Ascending(x => x.ServiceId)
-                    .Ascending(x => x.GrainId)
-                    .Ascending(x => x.ReminderName);
-            try
+            List<string> indexesToRemove =
+            [
+                // ByHash definitions.
+                "ByHash",
+#pragma warning disable CS0618 // Type or member is obsolete
+                $"{collection.GetFieldName(r => r.IsDeleted)}_1"
+                + $"_{collection.GetFieldName(r => r.ServiceId)}_1"
+                + $"_{collection.GetFieldName(r => r.GrainHash)}_1"
+#pragma warning restore CS0618 // Type or member is obsolete
+            ];
+
+            if (removeAllLegacyIndexes)
             {
-                collection.Indexes.CreateOne(
-                   new CreateIndexModel<MongoReminderDocument>(byNameDefinition,
-                        new CreateIndexOptions
-                        {
-                            Name = "ByName"
-                        }));
+                // these indexes are safe to keep and redundant.
+                // However, if a rolling deployment is made with silos with Orleans.Providers.MongoDB on version <=9.3.0,
+                // there is a high chance of collection scans impacting the full cluster. 
+                // See: https://github.com/OrleansContrib/Orleans.Providers.MongoDB/pull/154
+                indexesToRemove.AddRange([
+                    // ByName definition
+                    "ByName",
+#pragma warning disable CS0618 // Type or member is obsolete
+                    $"{collection.GetFieldName(r => r.IsDeleted)}_1"
+                    + $"_{collection.GetFieldName(r => r.ServiceId)}_1"
+                    + $"_{collection.GetFieldName(r => r.GrainId)}_1"
+                    + $"_{collection.GetFieldName(r => r.ReminderName)}_1",
+#pragma warning restore CS0618 // Type or member is obsolete
+                ]);
             }
-            catch (MongoCommandException ex)
+
+            foreach (var indexToRemove in indexesToRemove)
             {
-                if (ex.CodeName == "IndexOptionsConflict")
+                // best effort drop
+                try
                 {
-                    collection.Indexes.CreateOne(new CreateIndexModel<MongoReminderDocument>(byNameDefinition));
+                    collection.Indexes.DropOne(indexToRemove);
+                }
+                catch
+                {
+                    // Ignore since failure to drop a legacy index should not affect Silo operations under any circumstances.
+                    // see for motivation: https://github.com/OrleansContrib/Orleans.Providers.MongoDB/pull/154#discussion_r2617770110
                 }
             }
         }
 
-        public virtual async Task<ReminderTableData> ReadRowsInRange(uint beginHash, uint endHash)
+        public virtual async Task<ReminderTableData> ReadRows(uint beginHash, uint endHash)
         {
-            var reminders =
-                await Collection.Find(x =>
-                        x.IsDeleted == false &&
-                        x.ServiceId == serviceId &&
-                        x.GrainHash > beginHash &&
-                        x.GrainHash <= endHash)
-                    .ToListAsync();
+            // (begin) is beginning exclusive of hash
+            // [end] is the stop point, inclusive of hash
+            var filter = beginHash < endHash
+                ? Filter.And(
+                    Filter.Eq(x => x.ServiceId, serviceId),
+                    //       (begin)>>>>>>[end]
+                    Filter.Gt(x => x.GrainHash, beginHash),
+                    Filter.Lte(x => x.GrainHash, endHash)
+                )
+                : Filter.And(
+                    Filter.Eq(x => x.ServiceId, serviceId),
+                    Filter.Or( // >>>>>>[end]         (begin)>>>>>>>
+                        Filter.Lte(x => x.GrainHash, endHash),
+                        Filter.Gt(x => x.GrainHash, beginHash)
+                    )
+                );
+            var reminders = await Collection.Find(filter).ToListAsync();
 
-            return new ReminderTableData(reminders.Select(x => x.ToEntry(grainReferenceConverter)));
+            return new ReminderTableData(reminders.Select(x => x.ToEntry()));
         }
 
-        public virtual async Task<ReminderEntry> ReadRow(GrainReference grainRef, string reminderName)
+        public virtual async Task<ReminderEntry> ReadRow(GrainId grainId, string reminderName)
         {
-            var grainId = grainRef.ToKeyString();
-
+            var id = ReturnId(serviceId, grainId, reminderName);
             var reminder =
-                await Collection.Find(x =>
-                        x.IsDeleted == false &&
-                        x.ServiceId == serviceId &&
-                        x.GrainId == grainId &&
-                        x.ReminderName == reminderName)
+                await Collection.Find(Filter.Eq(x => x.Id, id))
                     .FirstOrDefaultAsync();
 
-            return reminder?.ToEntry(grainReferenceConverter);
+            return reminder?.ToEntry();
         }
 
-        public virtual async Task<ReminderTableData> ReadReminderRowsAsync(GrainReference grainRef)
-        {
-            var grainId = grainRef.ToKeyString();
-
-            var reminders =
-                await Collection.Find(x =>
-                        x.IsDeleted == false &&
-                        x.ServiceId == serviceId &&
-                        x.GrainId == grainId)
-                    .ToListAsync();
-
-            return new ReminderTableData(reminders.Select(x => x.ToEntry(grainReferenceConverter)));
-        }
-
-        public virtual async Task<ReminderTableData> ReadRowsOutRange(uint beginHash, uint endHash)
+        public virtual async Task<ReminderTableData> ReadRow(GrainId grainId)
         {
             var reminders =
-                await Collection.Find(x =>
-                        (x.IsDeleted == false) &&
-                        (x.ServiceId == serviceId) &&
-                        (x.GrainHash > beginHash || x.GrainHash <= endHash))
-                    .ToListAsync();
+                await Collection.Find(
+                    Filter.And(
+                        Filter.Eq(x => x.ServiceId, serviceId),
+                        Filter.Eq(x => x.GrainHash, grainId.GetUniformHashCode()),
+                        Filter.Eq(x => x.GrainId, grainId.ToString())
+                    )
+                ).ToListAsync();
 
-            return new ReminderTableData(reminders.Select(x => x.ToEntry(grainReferenceConverter)));
+            return new ReminderTableData(reminders.Select(x => x.ToEntry()));
         }
 
-        public virtual async Task<ReminderTableData> ReadRow(GrainReference grainRef)
+        public async Task<bool> RemoveRow(GrainId grainId, string reminderName, string eTag)
         {
-            var grainId = grainRef.ToKeyString();
+            var id = ReturnId(serviceId, grainId, reminderName);
 
-            var reminders =
-                await Collection.Find(r =>
-                        r.ServiceId == serviceId &&
-                        r.GrainId == grainId)
-                    .ToListAsync();
-
-            return new ReminderTableData(reminders.Select(x => x.ToEntry(grainReferenceConverter)));
-        }
-
-        public async Task<bool> RemoveRow(GrainReference grainRef, string reminderName, string eTag)
-        {
-            var id = ReturnId(serviceId, grainRef, reminderName);
-
-            try
-            {
-                var existingDocument =
-                    await Collection.FindOneAndUpdateAsync<MongoReminderDocument, MongoReminderDocument>(x => x.Id == id && x.Etag == eTag,
-                        Update.Set(x => x.IsDeleted, true),
-                        FindAndUpsert);
-
-                await Collection.DeleteManyAsync(x => x.IsDeleted);
-
-                return string.Equals(existingDocument?.ReminderName, reminderName, StringComparison.Ordinal);
-            }
-            catch (MongoException ex)
-            {
-                if (ex.IsDuplicateKey())
-                {
-                    return false;
-                }
-                throw;
-            }
+            // optimization - we use expression builders over linq
+            var deleteResult = await Collection.DeleteOneAsync(
+                Filter.And(
+                    Filter.Eq(x => x.Id, id),
+                    Filter.Eq(x => x.Etag, eTag))
+            );
+            return deleteResult.DeletedCount > 0;
         }
 
         public virtual Task RemoveRows()
         {
+            // note: only used and called by the test harness
             return Collection.DeleteManyAsync(r => r.ServiceId == serviceId);
         }
 
         public virtual async Task<string> UpsertRow(ReminderEntry entry)
         {
-            var id = ReturnId(serviceId, entry.GrainRef, entry.ReminderName);
-
-            var updatedEtag = Guid.NewGuid().ToString();
-            var updateDocument = MongoReminderDocument.Create(id, serviceId, entry, updatedEtag);
+            var id = ReturnId(serviceId, entry.GrainId, entry.ReminderName);
+            var document = MongoReminderDocument.Create(id, serviceId, entry, Guid.NewGuid().ToString());
 
             try
             {
-                await Collection.ReplaceOneAsync(x => x.Id == id,
-                    updateDocument,
-                    UpsertReplace);
+                // optimization - we will only upsert the fields which will change on an update to avoid IO cost for static.
+                // if there isn't a record matching the filter, a new record will be created with all fields set with the
+                // values specified in the filter.
+                await Collection.UpdateOneAsync(
+                    Filter.And(
+                        Filter.Eq(x => x.Id, id),
+                        Filter.Eq(x => x.ServiceId, document.ServiceId),
+                        Filter.Eq(x => x.GrainId, document.GrainId),
+                        Filter.Eq(x => x.ReminderName, document.ReminderName),
+                        Filter.Eq(x => x.GrainHash, document.GrainHash)
+                    ),
+                    Update
+                        .Set(x => x.Etag, document.Etag)
+                        .Set(x => x.Period, document.Period)
+                        .Set(x => x.StartAt, document.StartAt),
+                    Upsert
+                );
             }
             catch (MongoException ex)
             {
-                if (!ex.IsDuplicateKey())
+                if (ex.IsDuplicateKey())
                 {
-                    throw;
+                    // in the very unlikely future event that grain hashing (or similar) is computed differently in
+                    // future Orleans versions, we will have a duplicate key on the id. We will do a full classic upsert
+                    // as a fallback. This will prevent upgrade and timing of multiple releases for MongoDB provider developers
+                    await Collection.ReplaceOneAsync(r => r.Id == id, document, UpsertReplace);
                 }
+
+                throw;
             }
-
-            entry.ETag = updatedEtag;
-
-            return entry.ETag;
+ 
+            return entry.ETag = document.Etag;
         }
 
-        private static string ReturnId(string serviceId, GrainReference grainRef, string reminderName)
+        private static string ReturnId(string serviceId, GrainId grainId, string reminderName)
         {
-            return $"{serviceId}_{grainRef.ToKeyString()}_{reminderName}";
+            return $"{serviceId}_{grainId}_{reminderName}";
         }
     }
 }

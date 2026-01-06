@@ -14,12 +14,17 @@ namespace Orleans.Providers.MongoDB.Membership.Store.Multiple
         private readonly TableVersionCollection tableVersionCollection;
         private readonly string collectionPrefix;
 
-        public MultipleMembershipCollection(IMongoClient mongoClient, string databaseName, string collectionPrefix, bool createShardKey)
-            : base(mongoClient, databaseName, createShardKey)
+        public MultipleMembershipCollection(
+            IMongoClient mongoClient,
+            string databaseName,
+            string collectionPrefix,
+            Action<MongoCollectionSettings> collectionConfigurator,
+            bool createShardKey)
+            : base(mongoClient, databaseName, collectionConfigurator, createShardKey)
         {
             this.collectionPrefix = collectionPrefix;
 
-            tableVersionCollection = new TableVersionCollection(mongoClient, databaseName, collectionPrefix, createShardKey);
+            tableVersionCollection = new TableVersionCollection(mongoClient, databaseName, collectionPrefix, collectionConfigurator, createShardKey);
         }
 
         protected override string CollectionName()
@@ -41,41 +46,28 @@ namespace Orleans.Providers.MongoDB.Membership.Store.Multiple
 
         public async Task<bool> UpsertRow(string deploymentId, MembershipEntry entry, string etag, TableVersion tableVersion)
         {
-            using (var session = await Client.StartSessionAsync())
+            using var session = await Client.StartSessionAsync();
+            return await session.WithTransactionAsync(async (sessionHandle, ct) =>
             {
-                try
+                var hasUpsertedTable = await tableVersionCollection.UpsertAsync(sessionHandle, tableVersion, deploymentId);
+
+                if (!hasUpsertedTable)
                 {
-                    session.StartTransaction();
-
-                    var hasUpsertedTable = await tableVersionCollection.UpsertAsync(session, tableVersion, deploymentId);
-
-                    if (!hasUpsertedTable)
-                    {
-                        await session.AbortTransactionAsync();
-                        return false;
-                    }
-
-                    var hasUpsertedMember = await UpsertRowAsync(session, deploymentId, entry, etag);
-
-                    var isOkay = hasUpsertedMember && hasUpsertedTable;
-
-                    if (isOkay)
-                    {
-                        await session.CommitTransactionAsync();
-                    }
-                    else
-                    {
-                        await session.AbortTransactionAsync();
-                    }
-
-                    return isOkay;
+                    await sessionHandle.AbortTransactionAsync(ct);
+                    return false;
                 }
-                catch (Exception)
+
+                var hasUpsertedMember = await UpsertRowAsync(sessionHandle, deploymentId, entry, etag);
+
+                var isOkay = hasUpsertedMember && hasUpsertedTable;
+
+                if (!isOkay)
                 {
-                    await session.AbortTransactionAsync();
-                    throw;
+                    await sessionHandle.AbortTransactionAsync(ct);
                 }
-            }
+
+                return isOkay;
+            });
         }
 
         private async Task<bool> UpsertRowAsync(IClientSessionHandle session, string deploymentId, MembershipEntry entry, string etag)
@@ -111,60 +103,29 @@ namespace Orleans.Providers.MongoDB.Membership.Store.Multiple
 
         public async Task<MembershipTableData> ReadAll(string deploymentId)
         {
-            using (var session = await Client.StartSessionAsync())
-            {
-                try
-                {
-                    session.StartTransaction();
+            using var session = await Client.StartSessionAsync();
+            
+            var tableVersion = await tableVersionCollection.GetTableVersionAsync(session, deploymentId);
 
-                    var tableVersion = tableVersionCollection.GetTableVersionAsync(deploymentId);
+            var entries =
+                await Collection.Find(session, x => x.DeploymentId == deploymentId).ToListAsync();
 
-                    var entries =
-                        Collection.Find(x => x.DeploymentId == deploymentId)
-                            .ToListAsync();
-
-                    await Task.WhenAll(tableVersion, entries);
-
-                    await session.CommitTransactionAsync();
-
-                    return ReturnMembershipTableData(entries.Result, tableVersion.Result);
-                }
-                catch (Exception)
-                {
-                    await session.AbortTransactionAsync();
-                    throw;
-                }
-            }
+            return ReturnMembershipTableData(entries, tableVersion);
         }
 
         public async Task<MembershipTableData> ReadRow(string deploymentId, SiloAddress address)
         {
-            using (var session = await Client.StartSessionAsync())
-            {
-                try
-                {
-                    session.StartTransaction();
+            using var session = await Client.StartSessionAsync();
+            
+            var tableVersion = await tableVersionCollection.GetTableVersionAsync(session, deploymentId);
 
-                    var tableVersion = tableVersionCollection.GetTableVersionAsync(deploymentId);
+            var id = ReturnId(deploymentId, address);
 
-                    var id = ReturnId(deploymentId, address);
+            var entries =
+                await Collection.Find(session, x => x.Id == id).ToListAsync();
 
-                    var entries =
-                        Collection.Find(x => x.Id == id)
-                            .ToListAsync();
-
-                    await Task.WhenAll(tableVersion, entries);
-
-                    await session.CommitTransactionAsync();
-
-                    return ReturnMembershipTableData(entries.Result, tableVersion.Result);
-                }
-                catch (Exception)
-                {
-                    await session.AbortTransactionAsync();
-                    throw;
-                }
-            }
+            return ReturnMembershipTableData(entries, tableVersion);
+            
         }
 
         public Task UpdateIAmAlive(string deploymentId, SiloAddress address, DateTime iAmAliveTime)
@@ -176,15 +137,21 @@ namespace Orleans.Providers.MongoDB.Membership.Store.Multiple
 
         public Task CleanupDefunctSiloEntries(string deploymentId, DateTimeOffset beforeDate)
         {
-            return Collection.DeleteManyAsync(x => x.DeploymentId == deploymentId && x.Status == (int)SiloStatus.Dead && x.Timestamp < beforeDate);
+            var beforeUtc = beforeDate.UtcDateTime;
+
+            return Collection.DeleteManyAsync(x => x.DeploymentId == deploymentId && x.Status != (int)SiloStatus.Active && x.Timestamp < beforeUtc);
         }
 
-        public Task DeleteMembershipTableEntries(string deploymentId)
+        public async Task DeleteMembershipTableEntries(string deploymentId)
         {
-            return Task.WhenAll(
-                Collection.DeleteManyAsync(x => x.DeploymentId == deploymentId),
-                tableVersionCollection.DeleteAsync(deploymentId)
-            );
+            using var session = await Client.StartSessionAsync();
+
+            await session.WithTransactionAsync(async (sessionHandle, ct) =>
+            {
+                await Collection.DeleteManyAsync(sessionHandle, x => x.DeploymentId == deploymentId);
+                await tableVersionCollection.DeleteAsync(sessionHandle, deploymentId);
+                return true;
+            });
         }
 
         private static MembershipTableData ReturnMembershipTableData(IEnumerable<MongoMembershipDocument> membershipList, TableVersion tableVersion)

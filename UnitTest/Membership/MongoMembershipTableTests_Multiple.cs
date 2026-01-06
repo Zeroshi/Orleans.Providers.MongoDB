@@ -1,9 +1,10 @@
-﻿using Orleans.Messaging;
-using System.Threading.Tasks;
+﻿using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
-using Orleans.Providers.MongoDB.Membership;
+using Orleans.Messaging;
 using Orleans.Providers.MongoDB.Configuration;
+using Orleans.Providers.MongoDB.Membership;
+using Orleans.Providers.MongoDB.UnitTest.Fixtures;
 using TestExtensions;
 using UnitTests;
 using UnitTests.MembershipTests;
@@ -26,13 +27,13 @@ namespace Orleans.Providers.MongoDB.UnitTest.Membership
             {
                 CollectionPrefix = "Test_",
                 DatabaseName = "OrleansTest",
-                Strategy = MongoDBMembershipStrategy.Muiltiple
+                Strategy = MongoDBMembershipStrategy.Multiple
             });
 
             return new MongoMembershipTable(
-                TestClients.ReplicaSet.Value,
+                MongoDatabaseFixture.ReplicaSetFactory,
                 loggerFactory.CreateLogger<MongoMembershipTable>(),
-                clusterOptions,
+                _clusterOptions,
                 options);
         }
 
@@ -42,26 +43,26 @@ namespace Orleans.Providers.MongoDB.UnitTest.Membership
             {
                 CollectionPrefix = "Test_",
                 DatabaseName = "OrleansTest",
-                Strategy = MongoDBMembershipStrategy.Muiltiple
+                Strategy = MongoDBMembershipStrategy.Multiple
             });
 
             return new MongoGatewayListProvider(
-                TestClients.ReplicaSet.Value,
+                MongoDatabaseFixture.ReplicaSetFactory,
                 loggerFactory.CreateLogger<MongoGatewayListProvider>(),
-                clusterOptions,
-                gatewayOptions,
+                _clusterOptions,
+                _gatewayOptions,
                 options);
         }
 
         protected override Task<string> GetConnectionString()
         {
-            return Task.FromResult("mongodb://localhost/OrleansTest");
+            return Task.FromResult(MongoDatabaseFixture.ReplicaSetConnectionString);
         }
 
         [Fact, TestCategory("Functional")]
         public async Task Test_CleanupDefunctSiloEntries()
         {
-            await MembershipTable_GetGateways();
+            await MembershipTable_CleanupDefunctSiloEntries();
         }
 
         [Fact, TestCategory("Functional")]

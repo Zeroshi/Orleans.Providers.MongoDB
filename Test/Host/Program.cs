@@ -3,13 +3,19 @@ using System.Linq;
 using System.Net;
 using System.Threading.Tasks;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using MongoDB.Bson;
+using MongoDB.Bson.Serialization;
+using MongoDB.Bson.Serialization.Conventions;
+using MongoDB.Bson.Serialization.Serializers;
+using MongoSandbox;
 using Newtonsoft.Json;
-using Newtonsoft.Json.Converters;
 using Orleans.Configuration;
 using Orleans.Hosting;
+using Orleans.Providers.MongoDB.Configuration;
+using Orleans.Providers.MongoDB.StorageProviders.Serializers;
 using Orleans.Providers.MongoDB.Test.GrainInterfaces;
-using Orleans.Providers.MongoDB.Test.Grains;
 
 namespace Orleans.Providers.MongoDB.Test.Host
 {
@@ -17,93 +23,87 @@ namespace Orleans.Providers.MongoDB.Test.Host
     {
         public static async Task Main(string[] args)
         {
-            var connectionString = "mongodb://localhost/OrleansTestApp";
             var createShardKey = false;
 
-            var silo = new SiloHostBuilder()
-                .ConfigureApplicationParts(options =>
-                {
-                    options.AddApplicationPart(typeof(EmployeeGrain).Assembly).WithReferences();
-                })
-                .UseMongoDBClient(connectionString)
-                .UseMongoDBClustering(options =>
-                {
-                    options.DatabaseName = "OrleansTestApp";
-                    options.CreateShardKeyForCosmos = createShardKey;
-                })
-                .AddStartupTask(async (s, ct) =>
-                {
-                    var grainFactory = s.GetRequiredService<IGrainFactory>();
+            using var mongoRunner = MongoRunner.Run();
 
-                    await grainFactory.GetGrain<IHelloWorldGrain>((int)DateTime.UtcNow.TimeOfDay.Ticks).SayHello("HI");
-                })
-                .UseMongoDBReminders(options =>
-                {
-                    options.DatabaseName = "OrleansTestApp";
-                    options.CreateShardKeyForCosmos = createShardKey;
-                })
-                .AddSimpleMessageStreamProvider("OrleansTestStream", options =>
-                {
-                    options.FireAndForgetDelivery = true;
-                    options.OptimizeForImmutableData = true;
-                    options.PubSubType = Orleans.Streams.StreamPubSubType.ExplicitGrainBasedOnly;
-                })
-                .AddMongoDBGrainStorage("PubSubStore", options =>
-                {
-                    options.DatabaseName = "OrleansTestAppPubSubStore";
-                    options.CreateShardKeyForCosmos = createShardKey;
+            Console.WriteLine("MongoDB ConnectionString: {0}", mongoRunner.ConnectionString);
 
-                    options.ConfigureJsonSerializerSettings = settings =>
+            ApplyBsonConfiguration();
+
+            var host = new HostBuilder()
+                .UseOrleans((ctx, siloBuilder) => siloBuilder
+                    .UseMongoDBClient(mongoRunner.ConnectionString)
+                    .UseMongoDBClustering(options =>
                     {
-                        settings.NullValueHandling = NullValueHandling.Include;
-                        settings.ObjectCreationHandling = ObjectCreationHandling.Replace;
-                        settings.DefaultValueHandling = DefaultValueHandling.Populate;
-                    };
-
-                })
-                .AddMongoDBGrainStorage("MongoDBStore", options =>
-                {
-                    options.DatabaseName = "OrleansTestApp";
-                    options.CreateShardKeyForCosmos = createShardKey;
-
-                    options.ConfigureJsonSerializerSettings = settings =>
+                        options.DatabaseName = "OrleansTestApp";
+                        options.CreateShardKeyForCosmos = createShardKey;
+                    })
+                    .AddStartupTask(async (s, ct) =>
                     {
-                        settings.NullValueHandling = NullValueHandling.Include;
-                        settings.ObjectCreationHandling = ObjectCreationHandling.Replace;
-                        settings.DefaultValueHandling = DefaultValueHandling.Populate;
-                    };
+                        var grainFactory = s.GetRequiredService<IGrainFactory>();
 
-                })
-                .Configure<ClusterOptions>(options =>
-                {
-                    options.ClusterId = "helloworldcluster";
-                    options.ServiceId = "helloworldcluster";
-                })
-                .ConfigureEndpoints(IPAddress.Loopback, 11111, 30000)
+                        await grainFactory.GetGrain<IHelloWorldGrain>((int)DateTime.UtcNow.TimeOfDay.Ticks).SayHello("HI");
+                    })
+                    .UseMongoDBReminders(options =>
+                    {
+                        options.DatabaseName = "OrleansTestApp";
+                        options.CreateShardKeyForCosmos = createShardKey;
+                    })
+                    .AddMemoryStreams<DefaultMemoryMessageBodySerializer>("OrleansTestStream")
+                    .Configure<JsonGrainStateSerializerOptions>(options => options.ConfigureJsonSerializerSettings = settings =>
+                        {
+                            settings.NullValueHandling = NullValueHandling.Include;
+                            settings.ObjectCreationHandling = ObjectCreationHandling.Replace;
+                            settings.DefaultValueHandling = DefaultValueHandling.Populate;
+                        })
+                    .ConfigureServices(services => services
+                        .AddKeyedSingleton<IGrainStateSerializer, BinaryGrainStateSerializer>(ProviderConstants.DEFAULT_PUBSUB_PROVIDER_NAME)
+                        .AddKeyedSingleton<IGrainStateSerializer, BsonGrainStateSerializer>("MongoDBBsonStore"))
+                    .AddMongoDBGrainStorage(ProviderConstants.DEFAULT_PUBSUB_PROVIDER_NAME, options =>
+                    {
+                        options.DatabaseName = "OrleansTestAppPubSubStore";
+                        options.CreateShardKeyForCosmos = createShardKey;
+                    })
+                    .AddMongoDBGrainStorage("MongoDBStore", options =>
+                    {
+                        options.DatabaseName = "OrleansTestApp";
+                        options.CreateShardKeyForCosmos = createShardKey;
+                    })
+                    .AddMongoDBGrainStorage("MongoDBBsonStore", options =>
+                        {
+                            options.DatabaseName = "OrleansTestApp";
+                            options.CreateShardKeyForCosmos = createShardKey;
+                        })
+                    .Configure<ClusterOptions>(options =>
+                    {
+                        options.ClusterId = "helloworldcluster";
+                        options.ServiceId = "helloworldcluster";
+                    })
+                    .ConfigureEndpoints(IPAddress.Loopback, 11111, 30000)
+                    .ConfigureLogging(logging => logging.AddConsole()))
+                .Build();
+
+            await host.StartAsync();
+
+            var clientHost = new HostBuilder()
+                .UseOrleansClient((ctx, clientBuilder) => clientBuilder
+                    .UseMongoDBClient(mongoRunner.ConnectionString)
+                    .UseMongoDBClustering(options =>
+                    {
+                        options.DatabaseName = "OrleansTestApp";
+                    })
+                    .Configure<ClusterOptions>(options =>
+                    {
+                        options.ClusterId = "helloworldcluster";
+                        options.ServiceId = "helloworldcluster";
+                    }))
                 .ConfigureLogging(logging => logging.AddConsole())
                 .Build();
 
-            await silo.StartAsync();
+            var client = clientHost.Services.GetRequiredService<IClusterClient>();
 
-            var client = new ClientBuilder()
-                .ConfigureApplicationParts(options =>
-                {
-                    options.AddApplicationPart(typeof(IHelloWorldGrain).Assembly);
-                })
-                .UseMongoDBClient(connectionString)
-                .UseMongoDBClustering(options =>
-                {
-                    options.DatabaseName = "OrleansTestApp";
-                })
-                .Configure<ClusterOptions>(options =>
-                {
-                    options.ClusterId = "helloworldcluster";
-                    options.ServiceId = "helloworldcluster";
-                })
-                .ConfigureLogging(logging => logging.AddConsole())
-                .Build();
-
-            await client.Connect();
+            await clientHost.StartAsync();
 
             await TestBasic(client);
 
@@ -122,24 +122,24 @@ namespace Orleans.Providers.MongoDB.Test.Host
 
             Console.ReadKey();
 
-            await silo.StopAsync();
+            await host.StopAsync();
         }
 
         private static async Task TestStreams(IClusterClient client)
         {
             var streamProducer = client.GetGrain<IStreamProducerGrain>(0);
-            var streamConsumer1 = client.GetGrain<IStreamConsumerGrain>(0);
-            var streamConsumer2 = client.GetGrain<IStreamConsumerGrain>(0);
+            var streamConsumer1 = client.GetGrain<IStreamConsumerGrain>(1);
+            var streamConsumer2 = client.GetGrain<IStreamConsumerGrain>(2);
 
             _ = streamProducer.ProduceEvents();
 
             await streamConsumer1.Activate();
             await streamConsumer2.Activate();
 
-            await Task.Delay(1000);
+            await Task.Delay(3000);
 
             var consumed1 = await streamConsumer1.GetConsumedItems();
-            var consumed2 = await streamConsumer1.GetConsumedItems();
+            var consumed2 = await streamConsumer2.GetConsumedItems();
 
             Console.WriteLine("Consumed Events: {0}/{1}", consumed1, consumed2);
         }
@@ -147,8 +147,10 @@ namespace Orleans.Providers.MongoDB.Test.Host
         private static async Task TestBasic(IClusterClient client)
         {
             var helloWorldGrain = client.GetGrain<IHelloWorldGrain>(1);
+            var bsonGrain = client.GetGrain<IBsonGrain>("default");
 
             await helloWorldGrain.SayHello("World");
+            await bsonGrain.PersistAsync("Name");
         }
 
         private static async Task TestReminders(IClusterClient client)
@@ -201,6 +203,20 @@ namespace Orleans.Providers.MongoDB.Test.Host
             employeeId = await employee.ReturnLevel();
 
             Console.WriteLine(employeeId);
+        }
+
+        private static void ApplyBsonConfiguration()
+        {
+            ConventionRegistry.Register(
+                "Default",
+                new ConventionPack()
+                {
+                    new CamelCaseElementNameConvention(),
+                    new IgnoreExtraElementsConvention(true)
+                },
+                t => true);
+
+            BsonSerializer.RegisterSerializer(new GuidSerializer(GuidRepresentation.Standard));
         }
     }
 }

@@ -1,7 +1,6 @@
 ﻿using System;
 using MongoDB.Bson;
 using MongoDB.Bson.Serialization.Attributes;
-using Orleans.Runtime;
 
 namespace Orleans.Providers.MongoDB.Reminders.Store
 {
@@ -28,8 +27,9 @@ namespace Orleans.Providers.MongoDB.Reminders.Store
         [BsonRequired]
         public long GrainHash { get; set; }
 
-        [BsonRequired]
-        public bool IsDeleted { get; set; }
+        [BsonIgnoreIfNull]
+        [Obsolete("IsDeleted will be removed in future", UrlFormat = "https://github.com/OrleansContrib/Orleans.Providers.MongoDB/pull/154")]
+        public bool? IsDeleted { get; set; }
 
         [BsonRequired]
         [BsonDateTimeOptions(Kind = DateTimeKind.Utc)]
@@ -37,12 +37,17 @@ namespace Orleans.Providers.MongoDB.Reminders.Store
 
         public static MongoReminderDocument Create(string id, string serviceId, ReminderEntry entry, string etag)
         {
+            if (entry.StartAt.Kind is DateTimeKind.Unspecified)
+            {
+                entry.StartAt = new DateTime(entry.StartAt.Ticks, DateTimeKind.Utc);
+            }
+
             return new MongoReminderDocument
             {
                 Id = id,
                 Etag = etag,
-                GrainHash = entry.GrainRef.GetUniformHashCode(),
-                GrainId = entry.GrainRef.ToKeyString(),
+                GrainHash = entry.GrainId.GetUniformHashCode(),
+                GrainId = entry.GrainId.ToString(),
                 Period = entry.Period,
                 ReminderName = entry.ReminderName,
                 ServiceId = serviceId,
@@ -50,12 +55,12 @@ namespace Orleans.Providers.MongoDB.Reminders.Store
             };
         }
 
-        public ReminderEntry ToEntry(IGrainReferenceConverter grainReferenceConverter)
+        public ReminderEntry ToEntry()
         {
             return new ReminderEntry
             {
                 ETag = Etag,
-                GrainRef = grainReferenceConverter.GetGrainFromKeyString(GrainId),
+                GrainId = Runtime.GrainId.Parse(GrainId),
                 Period = Period,
                 ReminderName = ReminderName,
                 StartAt = StartAt

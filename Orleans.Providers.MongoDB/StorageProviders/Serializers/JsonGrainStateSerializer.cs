@@ -1,42 +1,35 @@
-﻿using Newtonsoft.Json;
+﻿using System;
+using Microsoft.Extensions.Options;
+using MongoDB.Bson;
+using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using Orleans.Providers.MongoDB.Configuration;
-using Orleans.Runtime;
 using Orleans.Serialization;
 
 namespace Orleans.Providers.MongoDB.StorageProviders.Serializers
 {
     public class JsonGrainStateSerializer : IGrainStateSerializer
     {
-        private readonly JsonSerializer serializer;
+        private readonly JsonSerializerSettings _jsonSettings;
 
-        public JsonGrainStateSerializer(ITypeResolver typeResolver, IGrainFactory grainFactory, MongoDBGrainStorageOptions options)
+        public JsonGrainStateSerializer(IOptions<JsonGrainStateSerializerOptions> options, IServiceProvider serviceProvider)
         {
-            var jsonSettings = OrleansJsonSerializer.GetDefaultSerializerSettings(typeResolver, grainFactory);           
-
-            options?.ConfigureJsonSerializerSettings?.Invoke(jsonSettings);
-            this.serializer = JsonSerializer.Create(jsonSettings);
-
-            if (options?.ConfigureJsonSerializerSettings == null)
-            {
-                //// https://github.com/OrleansContrib/Orleans.Providers.MongoDB/issues/44
-                //// Always include the default value, so that the deserialization process can overwrite default 
-                //// values that are not equal to the system defaults.
-                this.serializer.NullValueHandling = NullValueHandling.Include;
-                this.serializer.DefaultValueHandling = DefaultValueHandling.Populate;
-            }            
+            _jsonSettings = OrleansJsonSerializerSettings.GetDefaultSerializerSettings(serviceProvider);
+            options.Value.ConfigureJsonSerializerSettings(_jsonSettings);
         }
 
-        public void Deserialize(IGrainState grainState, JObject entityData)
+        public T Deserialize<T>(BsonValue value)
         {
-            var jsonReader = new JTokenReader(entityData);
-
-            serializer.Populate(jsonReader, grainState.State);
+            using var jsonReader = new JTokenReader(value.ToJToken());
+            // Creating a new serializer instance to avoid thread-safety issue: https://github.com/JamesNK/Newtonsoft.Json/issues/1452
+            var jsonSerializer = JsonSerializer.CreateDefault(_jsonSettings);
+            return jsonSerializer.Deserialize<T>(jsonReader);
         }
 
-        public JObject Serialize(IGrainState grainState)
+        public BsonValue Serialize<T>(T state)
         {
-            return JObject.FromObject(grainState.State, serializer);
+            var jsonSerializer = JsonSerializer.CreateDefault(_jsonSettings);
+            return JObject.FromObject(state, jsonSerializer).ToBson();
         }
     }
 }

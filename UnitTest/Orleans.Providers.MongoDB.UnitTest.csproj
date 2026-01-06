@@ -1,66 +1,41 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
-
+<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <TargetFramework>net472</TargetFramework>
+    <TargetFramework>net8.0</TargetFramework>
     <AutoGenerateBindingRedirects>true</AutoGenerateBindingRedirects>
     <GenerateBindingRedirectsOutputType>true</GenerateBindingRedirectsOutputType>
+    <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
+    <GenerateRuntimeConfigDevFile>true</GenerateRuntimeConfigDevFile>
     <IsPackable>false</IsPackable>
+    <MongoVersion Condition="'$(MongoVersion)' == ''">8</MongoVersion>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="FakeItEasy" Version="7.1.0" />
-    <PackageReference Include="FluentAssertions" Version="6.1.0" />
-    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="16.11.0" />
-    <PackageReference Include="Microsoft.Orleans.CodeGenerator.MSBuild" Version="3.4.3">
-      <PrivateAssets>all</PrivateAssets>
-      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
-    </PackageReference>
-    <PackageReference Include="Microsoft.Orleans.TestingHost" Version="3.4.3" />
-    <PackageReference Include="MongoDB.Driver" Version="2.13.1" />
-    <PackageReference Include="xunit" Version="2.4.1" />
-    <PackageReference Include="xunit.runner.console" Version="2.4.1">
-      <PrivateAssets>all</PrivateAssets>
-      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
-    </PackageReference>
-    <PackageReference Include="xunit.runner.visualstudio" Version="2.4.3">
-      <PrivateAssets>all</PrivateAssets>
-      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
-    </PackageReference>
-    <DotNetCliToolReference Include="dotnet-xunit" Version="2.3.1" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="MongoSandbox.Core" Version="2.0.0" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(MongoVersion)' == '6'">
+    <PackageReference Include="MongoSandbox6.runtime.linux-x64" Version="2.0.0" Condition="$([MSBuild]::IsOSPlatform('Linux'))" />
+    <PackageReference Include="MongoSandbox6.runtime.osx-arm64" Version="2.0.0" Condition="$([MSBuild]::IsOSPlatform('OSX'))" />
+    <PackageReference Include="MongoSandbox6.runtime.win-x64" Version="2.0.0" Condition="$([MSBuild]::IsOSPlatform('Windows'))" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(MongoVersion)' == '7'">
+    <PackageReference Include="MongoSandbox7.runtime.linux-x64" Version="2.0.0" Condition="$([MSBuild]::IsOSPlatform('Linux'))" />
+    <PackageReference Include="MongoSandbox7.runtime.osx-arm64" Version="2.0.0" Condition="$([MSBuild]::IsOSPlatform('OSX'))" />
+    <PackageReference Include="MongoSandbox7.runtime.win-x64" Version="2.0.0" Condition="$([MSBuild]::IsOSPlatform('Windows'))" />
+  </ItemGroup>
+  
+  <ItemGroup Condition="'$(MongoVersion)' == '8'">
+    <PackageReference Include="MongoSandbox8.runtime.linux-x64" Version="2.0.0" Condition="$([MSBuild]::IsOSPlatform('Linux'))" />
+    <PackageReference Include="MongoSandbox8.runtime.osx-arm64" Version="2.0.0" Condition="$([MSBuild]::IsOSPlatform('OSX'))" />
+    <PackageReference Include="MongoSandbox8.runtime.win-x64" Version="2.0.0" Condition="$([MSBuild]::IsOSPlatform('Windows'))" />
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\libs\orleans\src\Orleans.CodeGenerator\Orleans.CodeGenerator.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
+    <ProjectReference Include="..\libs\orleans\test\TesterInternal\TesterInternal.csproj" />
     <ProjectReference Include="..\Orleans.Providers.MongoDB\Orleans.Providers.MongoDB.csproj" />
   </ItemGroup>
-
-  <ItemGroup>
-    <Reference Include="Tester">
-      <HintPath>..\libs\Tester.dll</HintPath>
-    </Reference>
-    <Reference Include="TesterInternal">
-      <HintPath>..\libs\TesterInternal.dll</HintPath>
-    </Reference>
-    <Reference Include="TestExtensions">
-      <HintPath>..\libs\TestExtensions.dll</HintPath>
-    </Reference>
-    <Reference Include="TestGrainInterfaces">
-      <HintPath>..\libs\TestGrainInterfaces.dll</HintPath>
-    </Reference>
-    <Reference Include="TestGrains">
-      <HintPath>..\libs\TestGrains.dll</HintPath>
-    </Reference>
-    <Reference Include="TestInterfaces">
-      <HintPath>..\libs\TestInterfaces.dll</HintPath>
-    </Reference>
-    <Reference Include="TestInternalGrainInterfaces">
-      <HintPath>..\libs\TestInternalGrainInterfaces.dll</HintPath>
-    </Reference>
-    <Reference Include="TestInternalGrains">
-      <HintPath>..\libs\TestInternalGrains.dll</HintPath>
-    </Reference>
-    <Reference Include="TestVersionGrains">
-      <HintPath>..\libs\TestVersionGrains.dll</HintPath>
-    </Reference>
-  </ItemGroup>
-
 </Project>

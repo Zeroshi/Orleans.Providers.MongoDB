@@ -1,4 +1,6 @@
 ﻿using System;
+using System.Runtime.CompilerServices;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -20,7 +22,6 @@ namespace Orleans.Providers.MongoDB.Reminders
     {
         private readonly IMongoClient mongoClient;
         private readonly ILogger logger;
-        private readonly IGrainReferenceConverter grainReferenceConverter;
         private readonly MongoDBRemindersOptions options;
         private readonly string serviceId;
         private MongoReminderCollection collection;
@@ -29,55 +30,58 @@ namespace Orleans.Providers.MongoDB.Reminders
             IMongoClientFactory mongoClientFactory,
             ILogger<MongoReminderTable> logger,
             IOptions<MongoDBRemindersOptions> options,
-            IOptions<ClusterOptions> clusterOptions,
-            IGrainReferenceConverter grainReferenceConverter)
+            IOptions<ClusterOptions> clusterOptions)
         {
-            this.mongoClient = mongoClientFactory.Create(options.Value, "Membership");
+            this.mongoClient = mongoClientFactory.Create(options.Value, "Reminder");
             this.logger = logger;
             this.options = options.Value;
             this.serviceId = clusterOptions.Value.ServiceId ?? string.Empty;
-            this.grainReferenceConverter = grainReferenceConverter;
         }
 
         /// <inheritdoc />
-        public Task Init()
+        public Task StartAsync(CancellationToken cancellationToken = default)
         {
             collection =
                 new MongoReminderCollection(
                     mongoClient,
                     options.DatabaseName,
                     options.CollectionPrefix,
+                    options.CollectionConfigurator,
                     options.CreateShardKeyForCosmos,
-                    serviceId,
-                    grainReferenceConverter);
+                    options.PurgeLegacyIndexes,
+                    serviceId);
 
             return Task.CompletedTask;
         }
 
         /// <inheritdoc />
-        public Task<ReminderTableData> ReadRows(GrainReference key)
+        public Task<ReminderTableData> ReadRows(GrainId grainId)
         {
             return DoAndLog(nameof(ReadRows), () =>
             {
-                return collection.ReadRow(key);
+                return collection.ReadRow(grainId);
             });
         }
 
         /// <inheritdoc />
-        public Task<bool> RemoveRow(GrainReference grainRef, string reminderName, string eTag)
+        public Task<bool> RemoveRow(GrainId grainId, string reminderName, string eTag)
         {
+            CheckGrainId(grainId);
+            
             return DoAndLog(nameof(RemoveRow), () =>
             {
-                return collection.RemoveRow(grainRef, reminderName, eTag);
+                return collection.RemoveRow(grainId, reminderName, eTag);
             });
         }
 
         /// <inheritdoc />
-        public Task<ReminderEntry> ReadRow(GrainReference grainRef, string reminderName)
+        public Task<ReminderEntry> ReadRow(GrainId grainId, string reminderName)
         {
+            CheckGrainId(grainId);
+            
             return DoAndLog(nameof(ReadRow), () =>
             {
-                return collection.ReadRow(grainRef, reminderName);
+                return collection.ReadRow(grainId, reminderName);
             });
         }
 
@@ -93,6 +97,8 @@ namespace Orleans.Providers.MongoDB.Reminders
         /// <inheritdoc />
         public Task<string> UpsertRow(ReminderEntry entry)
         {
+            CheckGrainId(entry.GrainId);
+            
             return DoAndLog(nameof(UpsertRow), () =>
             {
                 return collection.UpsertRow(entry);
@@ -104,14 +110,7 @@ namespace Orleans.Providers.MongoDB.Reminders
         {
             return DoAndLog(nameof(ReadRows), () =>
             {
-                if (begin < end)
-                {
-                    return collection.ReadRowsInRange(begin, end);
-                }
-                else
-                {
-                    return collection.ReadRowsOutRange(begin, end);
-                }
+                return collection.ReadRows(begin, end);
             });
         }
 
@@ -134,6 +133,14 @@ namespace Orleans.Providers.MongoDB.Reminders
 
                 throw;
             }
+        }
+        
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static void CheckGrainId(GrainId grainId)
+        {
+            if (grainId.IsDefault)
+                throw new InvalidOperationException(
+                    "Grain identifier is default. Was the reminder registry called from a client application?");
         }
     }
 }
